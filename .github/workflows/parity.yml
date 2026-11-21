@@ -1,0 +1,36 @@
+name: Inference parity
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test without Hub support or checkpoints
+        run: cargo test --locked --workspace --no-default-features
+
+  hub-parity:
+    name: Hub parity (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [5m, 28m, 123m, 209m]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compare forecasts with the Python reference
+        run: cargo test --locked --package burn-timestral --release --test test_inference_parity test_parity_${{ matrix.variant }} -- --ignored --exact --nocapture
+      - name: Run additional pretrained integration tests
+        if: matrix.variant == '209m'
+        run: cargo test --locked --package burn-timestral --release --lib -- --ignored --test-threads=1
