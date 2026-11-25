@@ -1,0 +1,3 @@
+[series.pv]
+value_column = "pv"
+fill = "linear"

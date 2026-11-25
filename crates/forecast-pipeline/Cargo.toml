@@ -1,0 +1,28 @@
+[package]
+name = "forecast-pipeline"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["hub"]
+hub = ["burn-timestral/hub"]
+wgpu = ["burn-timestral/wgpu"]
+csv = ["dep:csv"]
+postgres = ["dep:native-tls", "dep:postgres", "dep:postgres-native-tls"]
+influx3 = ["dep:csv", "dep:serde_json", "dep:ureq"]
+
+[dependencies]
+anyhow = "1"
+burn = { version = "0.22", features = ["flex"] }
+burn-timestral = { path = "../burn-timestral", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+csv = { version = "1.4", optional = true }
+native-tls = { version = "0.2", optional = true }
+postgres = { version = "0.19", features = ["with-chrono-0_4"], optional = true }
+postgres-native-tls = { version = "0.5", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", optional = true }
+thiserror = "2"
+toml = "0.8"
+ureq = { version = "2.12", features = ["json"], optional = true }

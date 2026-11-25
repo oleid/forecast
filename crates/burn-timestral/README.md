@@ -4,15 +4,7 @@ Native Burn inference for Mistral's Timestral time-series forecasting models: **
 
 ### CLI
 
-```sh
-cargo run --package burn-timestral --release -- series.csv 48 --headers --variant 5M
-cargo run --package burn-timestral --release --no-default-features -- series.csv 48 --headers --model-dir /path/to/checkpoint
-cargo run --package burn-timestral --release --features wgpu -- series.csv 48 --backend wgpu --variant 5M
-```
-
-Each CSV column is a series and each row is a time step. Use `--headers` only if the CSV has a header row. If neither `--variant` nor `--model-dir` is specified, the CLI loads 209M. A local directory must contain the original `config.json` and `model.safetensors`; its configuration determines the variant.
-
-Without `--backend`, the CLI uses Burn's `Device::default()`: Flex in a standard build, WGPU when built with `--features wgpu`, unless Burn's `BURN_DEVICE` environment variable overrides the default. This selects an enabled backend, not a fallback if no compatible GPU is available. Use `--backend cpu` to force Flex or `--backend wgpu` to explicitly initialize WGPU with the `wgpu` feature enabled.
+The command-line application is a separate workspace package, [`timestral-cli`](../timestral-cli/README.md). It supports CSV files, InfluxDB 3, and TimescaleDB while this crate remains a library.
 
 ### Library
 
