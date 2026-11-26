@@ -229,6 +229,8 @@ fn verify_scenario(default_forecaster: &TimestralForecaster, scenario: &ParitySc
     // Numerical parity comparison across all (B, V, H, Q) quantile elements
     let mut max_abs_diff = 0.0f32;
     let mut max_rel_diff = 0.0f32;
+    let mut closest = None;
+    let mut blocks = vec![(0usize, 0.0f32); scenario.prediction_length.div_ceil(32)];
 
     for (elem_idx, (&actual, &expected)) in forecast
         .predictions()
@@ -244,24 +246,47 @@ fn verify_scenario(default_forecaster: &TimestralForecaster, scenario: &ParitySc
 
         let abs_diff = (actual - expected).abs();
         let tol = ATOL + RTOL * expected.abs();
+        let margin = tol - abs_diff;
+        if closest.is_none_or(|(best, _)| margin < best) {
+            closest = Some((margin, elem_idx));
+        }
 
         max_abs_diff = max_abs_diff.max(abs_diff);
         max_rel_diff = max_rel_diff.max(abs_diff / expected.abs().max(1e-5));
 
         if abs_diff > tol {
-            let q = elem_idx % num_quantiles;
-            let rem = elem_idx / num_quantiles;
-            let h = rem % scenario.prediction_length;
-            let rem2 = rem / scenario.prediction_length;
-            let v = rem2 % scenario.variates;
-            let b = rem2 / scenario.variates;
-
-            panic!(
-                "Scenario '{}' parity violation at (b={b}, v={v}, h={h}, q={q}): actual={actual:.7}, expected={expected:.7}, diff={abs_diff:.6e} > tol={tol:.6e}",
-                scenario.name
+            let h = elem_idx / num_quantiles % scenario.prediction_length;
+            let (count, max_excess) = &mut blocks[h / 32];
+            *count += 1;
+            *max_excess = max_excess.max(abs_diff - tol);
+        }
+    }
+    if blocks.len() > 1 || blocks.iter().any(|&(count, _)| count != 0) {
+        for (block, (count, max_excess)) in blocks.iter().enumerate() {
+            println!(
+                "Scenario '{}' block {}: violations={count}, max_excess={max_excess:.6e}",
+                scenario.name,
+                block + 1
             );
         }
     }
+    if let Some((margin, index)) = closest {
+        let q = index % num_quantiles;
+        let row = index / num_quantiles;
+        let h = row % scenario.prediction_length;
+        let series = row / scenario.prediction_length;
+        let v = series % scenario.variates;
+        let b = series / scenario.variates;
+        println!(
+            "Scenario '{}' min_margin={margin:.9e} (tolerance minus error) at (b={b}, v={v}, h={h}, q={q})",
+            scenario.name
+        );
+    }
+    assert!(
+        blocks.iter().all(|&(count, _)| count == 0),
+        "Scenario '{}' exceeded parity tolerance",
+        scenario.name
+    );
 
     // Monotonicity check across quantiles
     for (row, quantiles) in forecast
