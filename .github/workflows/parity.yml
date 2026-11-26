@@ -29,27 +29,29 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Compare forecasts with the Python reference
-        if: matrix.variant != '209m'
-        run: cargo test --locked --package burn-timestral --release --test test_inference_parity test_parity_${{ matrix.variant }} -- --ignored --exact --nocapture
-      - name: Compare 209M forecasts five times on the same runner
-        if: matrix.variant == '209m'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install the CPU reference
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch==2.15.0'
+          python -m pip install 'numpy==2.5.5' 'timestral @ git+https://github.com/mistralai/timestral.git@a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff'
+      - name: Generate and compare forecasts on the same runner
         shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+          BURN_DEVICE: flex
         run: |
           printf 'Runner image: %s (%s)\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
           lscpu
           rustc -Vv
-          executable=$(cargo test --locked --package burn-timestral --release \
-            --test test_inference_parity --no-run --message-format=json | \
-            jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "test_inference_parity" and .executable != null) | .executable] | if length == 1 then .[0] else error("expected one parity test executable") end')
-          failed=0
-          for attempt in {1..5}; do
-            printf '\n209M parity run %s/5\n' "$attempt"
-            if ! "$executable" test_parity_209m --ignored --exact --nocapture; then
-              failed=1
-            fi
-          done
-          exit "$failed"
+          export TIMESTRAL_MODEL_DIR="$RUNNER_TEMP/timestral-model"
+          export TIMESTRAL_PARITY_FIXTURE="$RUNNER_TEMP/timestral-reference.json"
+          python crates/burn-timestral/tools/generate_parity_fixtures.py \
+            --variant "${VARIANT^^}" --download-checkpoint "$TIMESTRAL_MODEL_DIR" \
+            --out "$TIMESTRAL_PARITY_FIXTURE"
+          cargo test --locked --package burn-timestral --release --test test_inference_parity \
+            "test_parity_$VARIANT" -- --ignored --exact --nocapture
       - name: Run additional pretrained integration tests
         if: matrix.variant == '209m'
         run: cargo test --locked --package burn-timestral --release --lib -- --ignored --test-threads=1

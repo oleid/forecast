@@ -122,7 +122,11 @@ fn load_fixtures(fixture: &Fixture) -> ParityFixtures {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(fixture.file);
-    let file = File::open(&path).unwrap_or_else(|e| panic!("Opening {}: {e}", path.display()));
+    read_fixtures(&path)
+}
+
+fn read_fixtures(path: &Path) -> ParityFixtures {
+    let file = File::open(path).unwrap_or_else(|e| panic!("Opening {}: {e}", path.display()));
     serde_json::from_reader(BufReader::new(file))
         .unwrap_or_else(|e| panic!("Parsing {}: {e}", path.display()))
 }
@@ -411,7 +415,14 @@ fn test_parity_metadata_and_integrity() {
 }
 
 fn verify_variant(fixture: Fixture) {
-    let fixtures = load_fixtures(&fixture);
+    let fixtures = match std::env::var_os("TIMESTRAL_PARITY_FIXTURE") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            println!("Comparing against generated reference: {}", path.display());
+            read_fixtures(&path)
+        }
+        None => load_fixtures(&fixture),
+    };
     validate_fixtures(&fixture, &fixtures);
     let model_dir = std::env::var_os("TIMESTRAL_MODEL_DIR").map(PathBuf::from);
     let device = burn::tensor::Device::default();
