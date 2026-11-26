@@ -229,6 +229,7 @@ fn verify_scenario(default_forecaster: &TimestralForecaster, scenario: &ParitySc
     // Numerical parity comparison across all (B, V, H, Q) quantile elements
     let mut max_abs_diff = 0.0f32;
     let mut max_rel_diff = 0.0f32;
+    let mut closest = None;
     let mut blocks = vec![(0usize, 0.0f32); scenario.prediction_length.div_ceil(32)];
 
     for (elem_idx, (&actual, &expected)) in forecast
@@ -245,6 +246,10 @@ fn verify_scenario(default_forecaster: &TimestralForecaster, scenario: &ParitySc
 
         let abs_diff = (actual - expected).abs();
         let tol = ATOL + RTOL * expected.abs();
+        let margin = tol - abs_diff;
+        if closest.is_none_or(|(best, _)| margin < best) {
+            closest = Some((margin, elem_idx));
+        }
 
         max_abs_diff = max_abs_diff.max(abs_diff);
         max_rel_diff = max_rel_diff.max(abs_diff / expected.abs().max(1e-5));
@@ -264,6 +269,18 @@ fn verify_scenario(default_forecaster: &TimestralForecaster, scenario: &ParitySc
                 block + 1
             );
         }
+    }
+    if let Some((margin, index)) = closest {
+        let q = index % num_quantiles;
+        let row = index / num_quantiles;
+        let h = row % scenario.prediction_length;
+        let series = row / scenario.prediction_length;
+        let v = series % scenario.variates;
+        let b = series / scenario.variates;
+        println!(
+            "Scenario '{}' min_margin={margin:.9e} (tolerance minus error) at (b={b}, v={v}, h={h}, q={q})",
+            scenario.name
+        );
     }
     assert!(
         blocks.iter().all(|&(count, _)| count == 0),

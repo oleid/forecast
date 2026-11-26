@@ -30,7 +30,26 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Compare forecasts with the Python reference
+        if: matrix.variant != '209m'
         run: cargo test --locked --package burn-timestral --release --test test_inference_parity test_parity_${{ matrix.variant }} -- --ignored --exact --nocapture
+      - name: Compare 209M forecasts five times on the same runner
+        if: matrix.variant == '209m'
+        shell: bash
+        run: |
+          printf 'Runner image: %s (%s)\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+          lscpu
+          rustc -Vv
+          executable=$(cargo test --locked --package burn-timestral --release \
+            --test test_inference_parity --no-run --message-format=json | \
+            jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "test_inference_parity" and .executable != null) | .executable] | if length == 1 then .[0] else error("expected one parity test executable") end')
+          failed=0
+          for attempt in {1..5}; do
+            printf '\n209M parity run %s/5\n' "$attempt"
+            if ! "$executable" test_parity_209m --ignored --exact --nocapture; then
+              failed=1
+            fi
+          done
+          exit "$failed"
       - name: Run additional pretrained integration tests
         if: matrix.variant == '209m'
         run: cargo test --locked --package burn-timestral --release --lib -- --ignored --test-threads=1
