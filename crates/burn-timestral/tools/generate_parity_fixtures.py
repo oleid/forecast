@@ -757,6 +757,11 @@ def main() -> None:
         help="Path to the official checkpoint directory for the selected variant",
     )
     parser.add_argument(
+        "--download-checkpoint",
+        type=Path,
+        help="Download the pinned Hub checkpoint into this directory",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         help="Output JSON fixture file (defaults to the selected variant's fixture file)",
@@ -768,9 +773,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.checkpoint is None:
-        parser.error("--checkpoint or TIMESTRAL_CHECKPOINT is required")
-    checkpoint = Path(args.checkpoint).expanduser().resolve()
+    if args.download_checkpoint is not None:
+        if args.checkpoint is not None:
+            parser.error("--download-checkpoint cannot be combined with a local checkpoint")
+        from huggingface_hub import snapshot_download
+
+        checkpoint = args.download_checkpoint.expanduser().resolve()
+        snapshot_download(
+            repo_id=f"mistralai/Timestral-{args.variant}",
+            revision=CHECKPOINT_REVISIONS[args.variant],
+            allow_patterns=["config.json", "model.safetensors"],
+            local_dir=checkpoint,
+        )
+    elif args.checkpoint is not None:
+        checkpoint = Path(args.checkpoint).expanduser().resolve()
+    else:
+        parser.error("--checkpoint, TIMESTRAL_CHECKPOINT or --download-checkpoint is required")
     if not checkpoint.is_dir():
         parser.error(f"Checkpoint directory not found: {checkpoint}")
 

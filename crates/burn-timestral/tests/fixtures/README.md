@@ -4,6 +4,12 @@
 
 ### Rust tests
 
+In CI, each model job generates fresh reference quantiles with CPU PyTorch and
+compares them with Rust/Flex on the same runner using the same pinned checkpoint
+files. The generated JSON is passed via `TIMESTRAL_PARITY_FIXTURE`; set it only
+when running a single variant. Without that override the model tests use the
+checked-in fixtures. The offline integrity test always checks the checked-in files.
+
 Without a checkpoint (only fixture metadata and integrity checks; the four model tests are ignored by default):
 
 ```sh
