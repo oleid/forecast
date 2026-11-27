@@ -25,7 +25,7 @@ Without `--backend`, the CLI uses Burn's `Device::default()`: Flex in a standard
 
 ## Databases
 
-Database credentials are read from a TOML file, not command-line arguments. Keep that file private because it can contain access tokens or passwords. The original Influx settings are supported directly:
+Database credentials can be supplied in a TOML file or through the environment fallbacks below, not as command-line arguments. Keep the TOML file private because it can contain access tokens or passwords. The original Influx settings are supported directly:
 
 ```toml
 influx_url = "http://localhost:8181"
@@ -50,6 +50,8 @@ url = "postgresql://user:password@localhost:5432/homeassistant"
 ```
 
 `--connection <name>` supplies the default connection for database series. Each series can set its own `connection` instead. With the legacy `influx_url` / `influx_db` settings, the connection name is `influx`. A TimescaleDB connection uses a PostgreSQL connection URL. The CLI does not write database data; it issues `SELECT` queries and sets the TimescaleDB session time zone to UTC for consistent timestamp handling.
+
+For InfluxDB 3, `INFLUXDB3_AUTH_TOKEN` is used when the selected TOML connection has no token; a configured TOML token takes precedence. For TimescaleDB, `PGPASSWORD` supplies the password only when the PostgreSQL URL has no password. PostgreSQL uses password-based connection authentication here, not an HTTP bearer-token header; the environment variable must be set in the process environment before starting the CLI.
 
 For database input, pass only a positive horizon as a positional argument; do not pass a `db` marker or CSV path. The horizon accepts either a positive number of grid steps or a duration: with `--step 1h`, `96` and `96h` are equivalent; with `--step 15m`, `72h` is 288 steps. A duration must be an exact multiple of `--step` and is supported for database and timestamped CSV sources. For CSV without timestamps, continue to use a step count because each row is one step. The horizon is reserved from the end of the selected window, so at least one earlier step must remain for model context. Timestamps must be RFC 3339 and include a timezone (`Z` means UTC). When a config path starts with `~`, leave the tilde unquoted or use `"$HOME/..."`; quoting `~` prevents the shell from expanding it.
 

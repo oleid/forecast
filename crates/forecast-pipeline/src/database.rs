@@ -103,7 +103,7 @@ struct Connection<'a> {
     #[cfg(feature = "influx3")]
     database: &'a str,
     #[cfg(feature = "influx3")]
-    token: Option<&'a str>,
+    token: Option<String>,
 }
 
 struct QuerySpec<'a> {
@@ -267,6 +267,21 @@ fn resolve_connection<'a>(
     config: &'a ConfigFile,
     name: &str,
 ) -> Result<Connection<'a>, DatabaseError> {
+    #[cfg(feature = "influx3")]
+    {
+        resolve_connection_with_env(config, name, |variable| std::env::var(variable).ok())
+    }
+    #[cfg(not(feature = "influx3"))]
+    {
+        resolve_connection_with_env(config, name)
+    }
+}
+
+fn resolve_connection_with_env<'a>(
+    config: &'a ConfigFile,
+    name: &str,
+    #[cfg(feature = "influx3")] mut environment: impl FnMut(&str) -> Option<String>,
+) -> Result<Connection<'a>, DatabaseError> {
     if let Some(connection) = config.connections.iter().find(|item| item.name == name) {
         let provider = match connection.provider.to_ascii_lowercase().as_str() {
             #[cfg(feature = "influx3")]
@@ -297,7 +312,13 @@ fn resolve_connection<'a>(
             #[cfg(feature = "influx3")]
             database,
             #[cfg(feature = "influx3")]
-            token: connection.token.as_deref(),
+            token: if provider == Provider::InfluxDb3 {
+                resolve_influx_token(connection.token.as_deref(), || {
+                    environment("INFLUXDB3_AUTH_TOKEN")
+                })
+            } else {
+                None
+            },
         });
     }
 
@@ -313,11 +334,39 @@ fn resolve_connection<'a>(
                 provider: Provider::InfluxDb3,
                 url,
                 database,
-                token: config.influx_token.as_deref(),
+                token: resolve_influx_token(config.influx_token.as_deref(), || {
+                    environment("INFLUXDB3_AUTH_TOKEN")
+                }),
             });
         }
     }
     Err(DatabaseError::UnknownConnection(name.to_owned()))
+}
+
+#[cfg(feature = "postgres")]
+fn resolve_timescale_config(
+    url: &str,
+    environment_password: impl FnOnce() -> Option<String>,
+) -> Result<postgres::Config, DatabaseError> {
+    let mut config = url
+        .parse::<postgres::Config>()
+        .map_err(|_| DatabaseError::Connection)?;
+    if config.get_password().is_none() {
+        if let Some(password) = environment_password() {
+            config.password(password);
+        }
+    }
+    Ok(config)
+}
+
+#[cfg(feature = "influx3")]
+fn resolve_influx_token(
+    configured_token: Option<&str>,
+    environment_token: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    configured_token
+        .map(str::to_owned)
+        .or_else(environment_token)
 }
 
 fn quote_identifier(identifier: &str) -> Result<String, DatabaseError> {
@@ -401,7 +450,7 @@ fn build_influx_query(spec: &QuerySpec<'_>) -> Result<(String, serde_json::Value
 #[cfg(feature = "influx3")]
 fn query_influx(
     agent: &ureq::Agent,
-    connection: &Connection<'_>,
+    connection: &Connection,
     spec: &QuerySpec<'_>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -422,7 +471,7 @@ fn query_influx(
     let mut request = agent
         .post(&endpoint)
         .set("Content-Type", "application/json");
-    if let Some(token) = connection.token {
+    if let Some(token) = connection.token.as_deref() {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }
     let response = match request.send_json(body) {
@@ -522,10 +571,12 @@ fn parse_influx_csv(body: &str, num_values: usize) -> Result<Vec<Observation>, D
 
 #[cfg(feature = "postgres")]
 fn connect_timescale(url: &str) -> Result<postgres::Client, DatabaseError> {
+    let config = resolve_timescale_config(url, || std::env::var("PGPASSWORD").ok())?;
     let tls = native_tls::TlsConnector::new().map_err(|_| DatabaseError::Connection)?;
     let connector = postgres_native_tls::MakeTlsConnector::new(tls);
-    let mut client =
-        postgres::Client::connect(url, connector).map_err(|_| DatabaseError::Connection)?;
+    let mut client = config
+        .connect(connector)
+        .map_err(|_| DatabaseError::Connection)?;
     client
         .batch_execute("SET TIME ZONE 'UTC'")
         .map_err(|_| DatabaseError::Connection)?;
@@ -1058,6 +1109,16 @@ max_hold = "2m"
         status: u16,
         response: &str,
     ) -> serde_json::Value {
+        influx_exchange_with_auth(listener, status, response, Some("test-token"))
+    }
+
+    #[cfg(feature = "influx3")]
+    fn influx_exchange_with_auth(
+        listener: &TcpListener,
+        status: u16,
+        response: &str,
+        expected_token: Option<&str>,
+    ) -> serde_json::Value {
         let (mut stream, _) = listener.accept().unwrap();
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
@@ -1092,11 +1153,13 @@ max_hold = "2m"
         .unwrap();
         let headers = String::from_utf8_lossy(&request[..header_end]);
         assert!(headers.starts_with("POST /api/v3/query_sql HTTP/1.1"));
-        assert!(
-            headers
-                .to_ascii_lowercase()
-                .contains("authorization: bearer test-token")
-        );
+        let authorization = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("authorization")
+                .then_some(value.trim())
+        });
+        let expected_authorization = expected_token.map(|token| format!("Bearer {token}"));
+        assert_eq!(authorization, expected_authorization.as_deref());
         let body = &request[header_end + 4..header_end + 4 + content_length];
         serde_json::from_slice(body).unwrap()
     }
@@ -1130,6 +1193,144 @@ max_hold = "2m"
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].values, vec![Some(4.5)]);
+    }
+
+    #[test]
+    #[cfg(feature = "influx3")]
+    fn resolves_named_and_legacy_influx_tokens_with_toml_precedence() {
+        let named_with_token: super::ConfigFile = toml::from_str(
+            "[[connections]]\nname = 'influx'\nprovider = 'influxdb3'\nurl = 'http://localhost'\ndatabase = 'metrics'\ntoken = 'named-token'",
+        )
+        .unwrap();
+        let named_without_token: super::ConfigFile = toml::from_str(
+            "[[connections]]\nname = 'influx'\nprovider = 'influxdb3'\nurl = 'http://localhost'\ndatabase = 'metrics'",
+        )
+        .unwrap();
+        let legacy_with_token: super::ConfigFile = toml::from_str(
+            "influx_url = 'http://localhost'\ninflux_db = 'metrics'\ninflux_token = 'legacy-token'",
+        )
+        .unwrap();
+        let legacy_without_token: super::ConfigFile =
+            toml::from_str("influx_url = 'http://localhost'\ninflux_db = 'metrics'").unwrap();
+
+        assert_eq!(
+            super::resolve_connection_with_env(&named_with_token, "influx", |_| {
+                panic!("environment token should not override TOML")
+            })
+            .unwrap()
+            .token
+            .as_deref(),
+            Some("named-token")
+        );
+        assert_eq!(
+            super::resolve_connection_with_env(&named_without_token, "influx", |_| {
+                Some("environment-token".to_owned())
+            })
+            .unwrap()
+            .token
+            .as_deref(),
+            Some("environment-token")
+        );
+        assert_eq!(
+            super::resolve_connection_with_env(&legacy_with_token, "influx", |_| {
+                panic!("environment token should not override TOML")
+            })
+            .unwrap()
+            .token
+            .as_deref(),
+            Some("legacy-token")
+        );
+        assert_eq!(
+            super::resolve_connection_with_env(&legacy_without_token, "influx", |_| {
+                Some("environment-token".to_owned())
+            })
+            .unwrap()
+            .token
+            .as_deref(),
+            Some("environment-token")
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "influx3")]
+    fn sends_environment_token_and_omits_authorization_without_a_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let response = "__timestral_time,__timestral_value_0\n";
+            let with_token =
+                influx_exchange_with_auth(&listener, 200, response, Some("environment-token"));
+            let without_token = influx_exchange_with_auth(&listener, 200, response, None);
+            (with_token, without_token)
+        });
+        let config: super::ConfigFile = toml::from_str(&format!(
+            "[[connections]]\nname = 'influx'\nprovider = 'influxdb3'\nurl = 'http://{address}'\ndatabase = 'metrics'"
+        ))
+        .unwrap();
+        let columns = ["value".to_owned()];
+        let from = parse_db_timestamp("2026-01-02T00:00:00Z").unwrap();
+        let spec = QuerySpec {
+            table: "sensors",
+            time_column: "time",
+            value_columns: &columns,
+            filters: &[],
+        };
+        let to = from + Duration::minutes(1);
+        let connection = super::resolve_connection_with_env(&config, "influx", |_| {
+            Some("environment-token".to_owned())
+        })
+        .unwrap();
+        super::query_influx(&ureq::Agent::new(), &connection, &spec, from, to).unwrap();
+        let connection = super::resolve_connection_with_env(&config, "influx", |_| None).unwrap();
+        super::query_influx(&ureq::Agent::new(), &connection, &spec, from, to).unwrap();
+        let (with_token, without_token) = server.join().unwrap();
+        assert_eq!(with_token["db"], "metrics");
+        assert_eq!(without_token["db"], "metrics");
+    }
+
+    #[test]
+    #[cfg(feature = "postgres")]
+    fn resolves_timescale_password_from_environment_only_when_url_has_none() {
+        let config = super::resolve_timescale_config("postgresql://user@localhost/metrics", || {
+            Some("environment-password".to_owned())
+        })
+        .unwrap();
+        assert_eq!(
+            config.get_password(),
+            Some(b"environment-password".as_slice())
+        );
+
+        let config = super::resolve_timescale_config(
+            "postgresql://user:url-password@localhost/metrics",
+            || panic!("PGPASSWORD must not override a URL password"),
+        )
+        .unwrap();
+        assert_eq!(config.get_password(), Some(b"url-password".as_slice()));
+    }
+
+    #[test]
+    #[cfg(feature = "postgres")]
+    fn leaves_timescale_password_unset_without_url_or_environment_password() {
+        let config =
+            super::resolve_timescale_config("postgresql://user@localhost/metrics", || None)
+                .unwrap();
+        assert_eq!(config.get_password(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "postgres")]
+    fn defers_timescale_url_parsing_until_connection() {
+        let config: super::ConfigFile = toml::from_str(
+            "[[connections]]\nname = 'timescale'\nprovider = 'timescaledb'\nurl = 'not-a-postgres-url'",
+        )
+        .unwrap();
+        let connection = super::resolve_connection(&config, "timescale").unwrap();
+
+        assert_eq!(connection.url, "not-a-postgres-url");
+        assert!(matches!(
+            super::connect_timescale(connection.url),
+            Err(DatabaseError::Connection)
+        ));
     }
 
     #[test]
